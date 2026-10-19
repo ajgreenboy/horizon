@@ -276,6 +276,18 @@ blocks and items by declaring them in `data/<id>/horizon/block/*.json` and
   "item": true }
 ```
 
+A block's `item` is `true` (the default: an item named as the block),
+`false` (none), or the id of its item when that is named otherwise, as a
+crop's seeds are:
+
+```json
+{ "template": "minecraft:wheat", "item": "farmersdelight:cabbage_seeds" }
+```
+
+The seeds then plant the crop, and picking the crop gives the seeds. The
+item is the mod's own (`<id>:...`); an item file under that id declares it,
+or without one it copies the template block's item (here wheat seeds).
+
 Items declare `max_stack_size` and `rarity`, and any of vanilla's data
 components in the 26.3 format, as an item modifier's `set_components`
 writes them: a name sets one over the template's, the name after `!`

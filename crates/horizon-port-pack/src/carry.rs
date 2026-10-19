@@ -906,6 +906,9 @@ pub fn carry(
         report.oracle = true;
         let prefix = format!("{id}:");
         let mut declared = BTreeSet::new();
+        // Items declared blocks name as theirs (a crop's seeds), with the
+        // block's template.
+        let mut named = BTreeMap::new();
         for (full, block) in facts.blocks.range(prefix.clone()..) {
             let Some(b) = full.strip_prefix(&prefix) else {
                 break;
@@ -923,6 +926,15 @@ pub fn carry(
             let mut v = json!({"template": choice.template, "properties": choice.properties});
             if block.item == "minecraft:air" {
                 v["item"] = json!(false);
+            } else if block.item.starts_with(&prefix)
+                && facts.items.contains_key(&block.item)
+                && facts
+                    .blocks
+                    .get(&choice.template)
+                    .is_some_and(|t| t.item != "minecraft:air")
+            {
+                v["item"] = json!(block.item);
+                named.insert(block.item.clone(), choice.template.clone());
             } else if block.item != *full {
                 v["item"] = json!(false);
                 report
@@ -976,6 +988,21 @@ pub fn carry(
                 break;
             };
             if declared.contains(full) {
+                continue;
+            }
+            if let Some(template) = named.get(full) {
+                match facts.block_item(full, template) {
+                    Ok((v, differences)) => {
+                        write_decl("item", name, &v)?;
+                        report.items += 1;
+                        if !differences.is_empty() {
+                            report.differences.insert(name.to_owned(), differences);
+                        }
+                    }
+                    Err(e) => {
+                        report.items_unknown.insert(name.to_owned(), e);
+                    }
+                }
                 continue;
             }
             if item

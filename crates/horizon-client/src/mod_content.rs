@@ -361,12 +361,19 @@ impl<'a> Plan<'a> {
                 Some(J::Str(i)) if i != "minecraft:air" => Some(i.clone()),
                 _ => None,
             };
-            if b.decl.item {
+            let Some(own) = &b.decl.item else {
+                continue;
+            };
+            // An item the mod declares under that id is the block's item.
+            let declared = mods
+                .iter()
+                .any(|m| m.content.items.iter().any(|i| i.id == *own));
+            if !declared {
                 let item = b.item.as_deref().ok_or_else(|| {
                     format!("{}: template {} has no item", b.decl.id, b.decl.template)
                 })?;
                 items.push(NewItem {
-                    rename: Rename::new(item, &b.decl.id),
+                    rename: Rename::new(item, own),
                     max_stack_size: None,
                     rarity: None,
                     components: Vec::new(),
@@ -409,16 +416,26 @@ impl<'a> Plan<'a> {
     }
 
     /// What moves in a new block's copies of its template's rows: the
-    /// block, and the template's item when it has another name. A block
-    /// without an item gets `minecraft:air` where rows name one.
+    /// block, and the template's item when it has another name. Where rows
+    /// name the block's item, [`Self::item_of`] sets it.
     fn renames(&self, b: &NewBlock) -> Vec<Rename> {
         let mut out = vec![b.rename.clone()];
         if let Some(item) = b.item.as_deref().filter(|i| *i != b.decl.template)
-            && b.decl.item
+            && let Some(own) = &b.decl.item
         {
-            out.push(Rename::new(item, &b.decl.id));
+            out.push(Rename::new(item, own));
         }
         out
+    }
+
+    /// The block's item where rows name one: its own, or `minecraft:air`.
+    fn item_of(b: &NewBlock) -> J {
+        J::Str(
+            b.decl
+                .item
+                .clone()
+                .unwrap_or_else(|| "minecraft:air".into()),
+        )
     }
 
     /// Appends each new block's copies of the template's states to `list`;
@@ -436,9 +453,7 @@ impl<'a> Plan<'a> {
                 }
                 if gameplay {
                     row.set("id", J::Num((b.rename.first + i as u32).into()));
-                    if !b.decl.item {
-                        row.set("item", J::Str("minecraft:air".into()));
-                    }
+                    row.set("item", Self::item_of(b));
                     self.override_gameplay(b, &mut row);
                 }
                 list.push(row);
@@ -568,8 +583,8 @@ impl<'a> Plan<'a> {
                         for r in &self.renames(b) {
                             v.rename(r, false);
                         }
-                        if !b.decl.item {
-                            v.set("item", J::Str("minecraft:air".into()));
+                        if v.get("item").is_some() || b.decl.item.is_none() {
+                            v.set("item", Self::item_of(b));
                         }
                         blocks.push(v);
                     }

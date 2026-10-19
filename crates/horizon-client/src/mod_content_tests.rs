@@ -110,10 +110,11 @@ fn prepared() -> Option<PathBuf> {
     .find(|root| root.join("gameplay-facts.json").exists())
 }
 
-/// A content mod folder: a full block, a door and an item-less glass from
-/// templates, an item, a vanilla tag addition and a language file.
+/// A content mod folder: a full block, a door, an item-less glass and a crop
+/// with its seeds from templates, items, a vanilla tag addition and a
+/// language file.
 fn ruby_mod(dir: &Path) -> ContentMod {
-    let files: [(&str, &str); 9] = [
+    let files: [(&str, &str); 11] = [
         (
             "horizon-mod.toml",
             "id = \"ruby\"\nname = \"Ruby\"\nversion = \"0.1.0\"\napi = \"0.2\"\nside = \"both\"\ncapabilities = [\"registries\"]\n",
@@ -130,6 +131,15 @@ fn ruby_mod(dir: &Path) -> ContentMod {
         (
             "data/ruby/horizon/block/ruby_glass.json",
             r#"{"template": "minecraft:glass", "item": false}"#,
+        ),
+        // A crop whose item is its seeds, declared on their own.
+        (
+            "data/ruby/horizon/block/ruby_wheat.json",
+            r#"{"template": "minecraft:wheat", "item": "ruby:ruby_seeds"}"#,
+        ),
+        (
+            "data/ruby/horizon/item/ruby_seeds.json",
+            r#"{"template": "minecraft:wheat_seeds", "rarity": "uncommon"}"#,
         ),
         (
             "data/ruby/horizon/item/ruby.json",
@@ -196,8 +206,9 @@ fn content_root_loads_with_every_table() {
         .map(BlockStateId)
         .find(|&s| old.state(s).unwrap().name == "minecraft:oak_door")
         .unwrap();
-    // Vanilla keeps its ids; blocks come after, sorted: ruby_block, ruby_door, ruby_glass.
-    assert_eq!(new.len(), old.len() + 1 + 64 + 1);
+    // Vanilla keeps its ids; blocks come after, sorted: ruby_block, ruby_door,
+    // ruby_glass, ruby_wheat.
+    assert_eq!(new.len(), old.len() + 1 + 64 + 1 + 8);
     assert_eq!(new.default_state("minecraft:iron_block"), Some(iron));
     let ruby = new.default_state("ruby:ruby_block").unwrap();
     assert_eq!(ruby, BlockStateId(n));
@@ -288,6 +299,18 @@ fn content_root_loads_with_every_table() {
     assert_eq!(stew.use_remainder.as_deref(), Some("minecraft:bowl"));
     assert_eq!(stew.crafting_remainder.as_deref(), Some("minecraft:bowl"));
     assert!(!items.items.contains_key("ruby:ruby_glass"));
+    // The seeds plant the crop, and the crop's item is the seeds.
+    let wheat = new.default_state("ruby:ruby_wheat").unwrap();
+    assert_eq!(wheat, BlockStateId(n + 66));
+    assert_eq!(&*facts.get(wheat).item, "ruby:ruby_seeds");
+    assert_eq!(items.items["ruby:ruby_seeds"].block, Some(wheat));
+    assert!(!items.items.contains_key("ruby:ruby_wheat"));
+    assert_eq!(
+        facts.get(wheat).classes,
+        old_facts
+            .get(old.default_state("minecraft:wheat").unwrap())
+            .classes
+    );
     let pickaxe = &items.block_tags["minecraft:mineable/pickaxe"];
     assert!(pickaxe.contains("ruby:ruby_block"));
     assert!(!pickaxe.contains("ruby:left_out") && !pickaxe.contains("othermod:thing"));
