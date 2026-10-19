@@ -123,6 +123,8 @@ pub struct ItemInfo {
 }
 /// `Item.Properties.craftRemainder` (not a data component, so not in the
 /// default-component report): what an item leaves in the grid when crafted with.
+/// Content mods' items carry theirs in items.json instead
+/// ([`crate::mod_content::CRAFTING_REMAINDER`]).
 pub const CRAFT_REMAINDERS: [(&str, &str); 5] = [
     ("minecraft:water_bucket", "minecraft:bucket"),
     ("minecraft:lava_bucket", "minecraft:bucket"),
@@ -596,7 +598,12 @@ impl Items {
                     crafting_remainder: CRAFT_REMAINDERS
                         .iter()
                         .find(|(item, _)| *item == name)
-                        .map(|(_, rest)| (*rest).to_owned()),
+                        .map(|(_, rest)| (*rest).to_owned())
+                        .or_else(|| {
+                            c[crate::mod_content::CRAFTING_REMAINDER]
+                                .as_str()
+                                .map(str::to_owned)
+                        }),
                     use_speed: c["minecraft:use_effects"]["speed_multiplier"]
                         .as_f64()
                         .unwrap_or(0.2) as f32,
