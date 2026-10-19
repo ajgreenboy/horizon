@@ -415,6 +415,15 @@ fn upgrade_condition(c: &mut Value) {
     {
         *c = json!(named);
     }
+    // NeoForge's tool abilities: the shears ones (`shears_harvest`,
+    // `shears_dig`...) are what vanilla's shears can do.
+    if c["type"] == "neoforge:can_item_perform_ability"
+        && c["ability"]
+            .as_str()
+            .is_some_and(|a| a.starts_with("shears_"))
+    {
+        *c = json!("minecraft:tool/can_shear");
+    }
 }
 
 /// 26.3's named tool conditions for the 1.21.1 predicates they replace.
@@ -1222,6 +1231,15 @@ mod tests {
             json!({"type": "minecraft:all_of", "terms": [
                 {"type": "minecraft:any_of", "terms": ["minecraft:tool/can_silk_touch", "minecraft:tool/can_shear"]},
                 {"type": "minecraft:survives_explosion"}]})
+        );
+        // Farmer's Delight's wild crops: NeoForge's shears ability.
+        let mut wild = json!({"pools": [{"conditions": [{"condition": "minecraft:inverted",
+            "term": {"condition": "neoforge:can_item_perform_ability", "ability": "shears_harvest"}}],
+            "entries": []}]});
+        upgrade_loot(&mut wild);
+        assert_eq!(
+            wild["pools"][0]["condition"],
+            json!({"type": "minecraft:inverted", "term": "minecraft:tool/can_shear"})
         );
         // A loot table already in 26.3's shape stays as it is.
         let mut new = glass.clone();
