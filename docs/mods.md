@@ -276,6 +276,23 @@ blocks and items by declaring them in `data/<id>/horizon/block/*.json` and
   "item": true }
 ```
 
+Items declare `max_stack_size` and `rarity`, and any of vanilla's data
+components in the 26.3 format, as an item modifier's `set_components`
+writes them: a name sets one over the template's, the name after `!`
+removes it. `crafting_remainder` is the item a recipe leaves in the grid
+(the bowl of a stew), which vanilla keeps as an item property rather than
+a component. A component name the game does not have, a remainder that is
+no item, or a field also given in `components` keeps the mod off.
+
+```json
+{ "template": "minecraft:mushroom_stew",
+  "components": {
+    "minecraft:food": { "nutrition": 10, "saturation": 12.0 },
+    "minecraft:max_stack_size": 16
+  },
+  "crafting_remainder": "minecraft:bowl" }
+```
+
 The fence: files go in the mod's own namespaces (`assets/<id>/`,
 `data/<id>/`, and those its manifest lists), plus additions to vanilla tags
 (`data/minecraft/tags/`) and to the convention tags NeoForge and Fabric mods

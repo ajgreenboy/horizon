@@ -11,7 +11,7 @@
 use crate::manifest::{Capability, MANIFEST, Manifest};
 use serde::Deserialize;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     io::Read,
     path::{Path, PathBuf},
 };
@@ -49,12 +49,25 @@ pub fn check_path(name: &str) -> Result<(), String> {
 
 /// A vanilla identifier, `minecraft:path`.
 fn vanilla_id(id: &str) -> bool {
-    id.strip_prefix("minecraft:").is_some_and(|path| {
-        !path.is_empty()
-            && path
+    id.strip_prefix("minecraft:").is_some_and(id_path)
+}
+
+/// Any identifier, `namespace:path`.
+fn any_id(id: &str) -> bool {
+    id.split_once(':').is_some_and(|(ns, path)| {
+        !ns.is_empty()
+            && ns
                 .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_./-".contains(&b))
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_.-".contains(&b))
+            && id_path(path)
     })
+}
+
+fn id_path(path: &str) -> bool {
+    !path.is_empty()
+        && path
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_./-".contains(&b))
 }
 
 /// What a declared block changes from its template; unset keeps the
@@ -116,6 +129,12 @@ struct ItemFile {
     template: String,
     max_stack_size: Option<u8>,
     rarity: Option<Rarity>,
+    /// Default components in the 26.3 format, as a data pack's item
+    /// modifier writes them: `"minecraft:food": {...}` sets one,
+    /// `"!minecraft:food": {}` removes the template's.
+    #[serde(default)]
+    components: BTreeMap<String, serde_json::Value>,
+    crafting_remainder: Option<String>,
 }
 
 /// An item the mod adds: a vanilla template item's components under a new
@@ -127,6 +146,14 @@ pub struct Item {
     pub template: String,
     pub max_stack_size: Option<u8>,
     pub rarity: Option<Rarity>,
+    /// Components set (`Some`) or removed (`None`) by name,
+    /// `minecraft:<component>`. The game checks the names against its
+    /// component registry.
+    pub components: BTreeMap<String, Option<serde_json::Value>>,
+    /// What stays in the crafting grid when a recipe uses the item
+    /// (`Item.Properties.craftRemainder`, not a component in 26.3): the
+    /// bowl of a stew, the bottle of a drink.
+    pub crafting_remainder: Option<String>,
 }
 
 #[derive(Debug)]
@@ -330,6 +357,26 @@ impl Content {
             if file.max_stack_size.is_some_and(|n| !(1..=99).contains(&n)) {
                 return Err(format!("{name}: max_stack_size is 1 to 99"));
             }
+            let components = components(file.components).map_err(|e| format!("{name}: {e}"))?;
+            for (field, set, key) in [
+                (
+                    "max_stack_size",
+                    file.max_stack_size.is_some(),
+                    "minecraft:max_stack_size",
+                ),
+                ("rarity", file.rarity.is_some(), "minecraft:rarity"),
+            ] {
+                if set && components.contains_key(key) {
+                    return Err(format!("{name}: {field} is set twice (also in components)"));
+                }
+            }
+            if let Some(r) = &file.crafting_remainder
+                && !any_id(r)
+            {
+                return Err(format!(
+                    "{name}: crafting_remainder {r:?} is not an item id (namespace:path)"
+                ));
+            }
             if !ids.insert(item.clone()) {
                 return Err(format!("{name}: {item} is also a block's item"));
             }
@@ -338,10 +385,34 @@ impl Content {
                 template: file.template,
                 max_stack_size: file.max_stack_size,
                 rarity: file.rarity,
+                components,
+                crafting_remainder: file.crafting_remainder,
             });
         }
         Ok(())
     }
+}
+
+/// An item file's `components`: vanilla names, each set or removed once.
+fn components(
+    raw: BTreeMap<String, serde_json::Value>,
+) -> Result<BTreeMap<String, Option<serde_json::Value>>, String> {
+    let mut out = BTreeMap::new();
+    for (key, value) in raw {
+        let (name, value) = match key.strip_prefix('!') {
+            Some(name) => (name.to_owned(), None),
+            None => (key, Some(value)),
+        };
+        if !vanilla_id(&name) {
+            return Err(format!(
+                "component {name:?} is not a vanilla component (minecraft:...)"
+            ));
+        }
+        if out.insert(name.clone(), value).is_some() {
+            return Err(format!("component {name} is both set and removed"));
+        }
+    }
+    Ok(out)
 }
 
 fn check_block(file: &BlockFile) -> Result<(), String> {
@@ -542,6 +613,60 @@ capabilities = ["registries"]
                 br#"{"template": "minecraft:stick", "max_stack_size": 100}"#,
             )],
         );
+    }
+
+    #[test]
+    fn items_declare_components_and_remainders() {
+        let stew: &[u8] = br#"{"template": "minecraft:mushroom_stew",
+            "components": {
+                "minecraft:food": {"nutrition": 10, "saturation": 12.0},
+                "!minecraft:use_remainder": {}
+            },
+            "crafting_remainder": "minecraft:bowl"}"#;
+        let content = hmod(
+            "components",
+            MANIFEST_TEXT,
+            &[("data/ruby/horizon/item/stew.json", stew)],
+        )
+        .unwrap();
+        let item = &content.items[0];
+        assert_eq!(
+            item.components["minecraft:food"],
+            Some(serde_json::json!({"nutrition": 10, "saturation": 12.0}))
+        );
+        assert_eq!(item.components["minecraft:use_remainder"], None);
+        assert_eq!(item.crafting_remainder.as_deref(), Some("minecraft:bowl"));
+
+        let refused = |name: &str, file: &[u8]| {
+            hmod(
+                name,
+                MANIFEST_TEXT,
+                &[("data/ruby/horizon/item/a.json", file)],
+            )
+            .unwrap_err()
+        };
+        let e = refused(
+            "modded-component",
+            br#"{"template": "minecraft:bread", "components": {"ruby:glow": {}}}"#,
+        );
+        assert!(e.contains("not a vanilla component"), "{e}");
+        let e = refused(
+            "set-and-removed",
+            br#"{"template": "minecraft:bread",
+                "components": {"minecraft:food": {}, "!minecraft:food": {}}}"#,
+        );
+        assert!(e.contains("both set and removed"), "{e}");
+        let e = refused(
+            "twice",
+            br#"{"template": "minecraft:bread", "rarity": "rare",
+                "components": {"minecraft:rarity": "epic"}}"#,
+        );
+        assert!(e.contains("set twice"), "{e}");
+        let e = refused(
+            "remainder",
+            br#"{"template": "minecraft:bread", "crafting_remainder": "Bowl"}"#,
+        );
+        assert!(e.contains("not an item id"), "{e}");
     }
 
     #[test]

@@ -15,6 +15,7 @@
 //! The loaders need no mod code, vanilla state ids never move, and with no
 //! content mod the root is the base root itself.
 use crate::{Result, blocks::MAP_COLORS};
+use horizon_assets::item_model::DATA_COMPONENT_TYPES;
 use horizon_mods::content::{Block, Content, Rarity};
 use horizon_world::nbt::{self, JavaString, Limits, Tag};
 use serde::{Deserialize, Serialize, de};
@@ -143,6 +144,11 @@ impl J {
             o.push((key.to_owned(), value));
         }
     }
+    fn remove(&mut self, key: &str) {
+        if let J::Obj(o) = self {
+            o.retain(|(k, _)| k != key);
+        }
+    }
     /// The value at a `/`-separated path ("" is the document).
     fn at(&mut self, path: &str) -> Option<&mut J> {
         path.split('/')
@@ -235,7 +241,14 @@ struct NewItem {
     rename: Rename,
     max_stack_size: Option<u8>,
     rarity: Option<Rarity>,
+    /// Components set (`Some`) or removed (`None`).
+    components: Vec<(String, Option<J>)>,
+    crafting_remainder: Option<String>,
 }
+/// Where items.json keeps a mod item's crafting remainder, which vanilla
+/// has as an item property and no component: a key vanilla never writes,
+/// read by `Items` (crate::items).
+pub const CRAFTING_REMAINDER: &str = "horizon:crafting_remainder";
 
 struct Plan<'a> {
     blocks: Vec<NewBlock<'a>>,
@@ -356,15 +369,33 @@ impl<'a> Plan<'a> {
                     rename: Rename::new(item, &b.decl.id),
                     max_stack_size: None,
                     rarity: None,
+                    components: Vec::new(),
+                    crafting_remainder: None,
                 });
             }
         }
         for m in &sorted {
             for i in &m.content.items {
+                let mut components = Vec::new();
+                for (name, value) in &i.components {
+                    if !DATA_COMPONENT_TYPES.contains(&name.as_str()) {
+                        return Err(format!("{}: {name} is not a component", i.id).into());
+                    }
+                    let value = match value {
+                        Some(v) => Some(
+                            serde_json::from_value::<J>(v.clone())
+                                .map_err(|e| format!("{}: {name}: {e}", i.id))?,
+                        ),
+                        None => None,
+                    };
+                    components.push((name.clone(), value));
+                }
                 items.push(NewItem {
                     rename: Rename::new(&i.template, &i.id),
                     max_stack_size: i.max_stack_size,
                     rarity: i.rarity,
+                    components,
+                    crafting_remainder: i.crafting_remainder.clone(),
                 });
             }
         }
@@ -457,8 +488,9 @@ impl<'a> Plan<'a> {
     }
 
     /// Adds each new item's copy of its template's entry to a map by name;
-    /// `components` applies the overrides (items.json).
-    fn items(&self, map: &mut J, components: bool) {
+    /// `components` applies the overrides (items.json), and checks that each
+    /// crafting remainder is an item.
+    fn items(&self, map: &mut J, components: bool) -> Result<()> {
         for i in &self.items {
             let Some(v) = map.get(&i.rename.from) else {
                 continue;
@@ -466,6 +498,15 @@ impl<'a> Plan<'a> {
             let mut v = v.clone();
             v.rename(&i.rename, false);
             if components {
+                for (name, value) in &i.components {
+                    match value {
+                        Some(value) => v.set(name, value.clone()),
+                        None => v.remove(name),
+                    }
+                }
+                if let Some(r) = &i.crafting_remainder {
+                    v.set(CRAFTING_REMAINDER, J::Str(r.clone()));
+                }
                 if let Some(n) = i.max_stack_size {
                     v.set("minecraft:max_stack_size", J::Num(n.into()));
                 }
@@ -481,6 +522,18 @@ impl<'a> Plan<'a> {
             }
             map.set(&i.rename.to, v);
         }
+        if components {
+            for i in &self.items {
+                if let Some(r) = &i.crafting_remainder
+                    && map.get(r).is_none()
+                {
+                    return Err(
+                        format!("{}: crafting_remainder {r} is not an item", i.rename.to).into(),
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     /// One JSON table, rewritten.
@@ -521,7 +574,7 @@ impl<'a> Plan<'a> {
                         blocks.push(v);
                     }
                 }
-                self.items(doc.at("items").ok_or("no items")?, false);
+                self.items(doc.at("items").ok_or("no items")?, false)?;
                 for odds in ["fire/burnOdds", "fire/igniteOdds"] {
                     if let Some(map) = doc.at(odds) {
                         self.names(map, false);
@@ -537,7 +590,7 @@ impl<'a> Plan<'a> {
                     self.names(map, false);
                 }
             }
-            "items.json" => self.items(doc, true),
+            "items.json" => self.items(doc, true)?,
             "command-registries.json" => {
                 self.names(doc.at("blocks").ok_or("no blocks")?, false);
                 let new_items = || self.items.iter().map(|i| J::Str(i.rename.to.clone()));

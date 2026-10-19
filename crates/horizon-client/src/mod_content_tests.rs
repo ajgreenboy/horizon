@@ -26,6 +26,58 @@ fn renames_ids_keys_and_states() {
     );
 }
 
+/// A declared item's components are set over its template's, removed ones
+/// are gone, and its crafting remainder goes under the key `Items` reads.
+#[test]
+fn item_components_override_the_template() {
+    let item = |remainder: &str| NewItem {
+        rename: Rename::new("minecraft:mushroom_stew", "ruby:stew"),
+        max_stack_size: Some(16),
+        rarity: None,
+        components: vec![
+            (
+                "minecraft:food".into(),
+                Some(serde_json::from_str(r#"{"nutrition": 10, "saturation": 12.0}"#).unwrap()),
+            ),
+            ("minecraft:use_remainder".into(), None),
+        ],
+        crafting_remainder: Some(remainder.into()),
+    };
+    let plan = |remainder: &str| Plan {
+        blocks: Vec::new(),
+        items: vec![item(remainder)],
+        states: 0,
+        defaults: BTreeMap::new(),
+        sounds: BTreeMap::new(),
+    };
+    let base = r#"{
+        "minecraft:bowl": {"minecraft:max_stack_size": 64},
+        "minecraft:mushroom_stew": {"minecraft:max_stack_size": 1,
+            "minecraft:food": {"nutrition": 6, "saturation": 7.2},
+            "minecraft:use_remainder": {"id": "minecraft:bowl"}}
+    }"#;
+    let mut doc: J = serde_json::from_str(base).unwrap();
+    plan("minecraft:bowl").json("items.json", &mut doc).unwrap();
+    let stew = serde_json::to_value(doc.get("ruby:stew").unwrap()).unwrap();
+    assert_eq!(
+        stew,
+        serde_json::json!({
+            "minecraft:max_stack_size": 16,
+            "minecraft:food": {"nutrition": 10, "saturation": 12.0},
+            CRAFTING_REMAINDER: "minecraft:bowl"
+        })
+    );
+    // The template keeps its own.
+    let template = serde_json::to_value(doc.get("minecraft:mushroom_stew").unwrap()).unwrap();
+    assert_eq!(template["minecraft:food"]["nutrition"], 6);
+
+    let mut doc: J = serde_json::from_str(base).unwrap();
+    let e = plan("ruby:no_such_bowl")
+        .json("items.json", &mut doc)
+        .unwrap_err();
+    assert!(e.to_string().contains("is not an item"), "{e}");
+}
+
 #[test]
 fn json_keeps_key_order_and_numbers() {
     let text = r#"{"z":1,"a":[0.6,5.0,-1,{"m":null,"b":true}],"k":"v"}"#;
@@ -61,7 +113,7 @@ fn prepared() -> Option<PathBuf> {
 /// A content mod folder: a full block, a door and an item-less glass from
 /// templates, an item, a vanilla tag addition and a language file.
 fn ruby_mod(dir: &Path) -> ContentMod {
-    let files: [(&str, &str); 8] = [
+    let files: [(&str, &str); 9] = [
         (
             "horizon-mod.toml",
             "id = \"ruby\"\nname = \"Ruby\"\nversion = \"0.1.0\"\napi = \"0.2\"\nside = \"both\"\ncapabilities = [\"registries\"]\n",
@@ -82,6 +134,13 @@ fn ruby_mod(dir: &Path) -> ContentMod {
         (
             "data/ruby/horizon/item/ruby.json",
             r#"{"template": "minecraft:diamond", "max_stack_size": 16, "rarity": "rare"}"#,
+        ),
+        (
+            "data/ruby/horizon/item/ruby_stew.json",
+            r#"{"template": "minecraft:mushroom_stew",
+                "components": {"minecraft:food": {"nutrition": 10, "saturation": 12.0},
+                    "minecraft:max_stack_size": 16},
+                "crafting_remainder": "minecraft:bowl"}"#,
         ),
         // Carried-over tags name blocks left out and other mods' ids too.
         (
@@ -222,6 +281,12 @@ fn content_root_loads_with_every_table() {
     assert_eq!(ruby_block.block, Some(ruby));
     let gem = &items.items["ruby:ruby"];
     assert_eq!(gem.max_stack, 16);
+    let stew = &items.items["ruby:ruby_stew"];
+    assert_eq!(stew.food, Some((10, 12.0)));
+    assert_eq!(stew.max_stack, 16);
+    assert!(stew.consumable.is_some());
+    assert_eq!(stew.use_remainder.as_deref(), Some("minecraft:bowl"));
+    assert_eq!(stew.crafting_remainder.as_deref(), Some("minecraft:bowl"));
     assert!(!items.items.contains_key("ruby:ruby_glass"));
     let pickaxe = &items.block_tags["minecraft:mineable/pickaxe"];
     assert!(pickaxe.contains("ruby:ruby_block"));
