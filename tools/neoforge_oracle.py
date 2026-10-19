@@ -174,17 +174,28 @@ def instance(name, jars, extra=()):
     run = LOCAL / 'runs' / name
     shutil.rmtree(run, ignore_errors=True)
     (run / 'mods').mkdir(parents=True)
-    (run / 'libraries').symlink_to(home / 'libraries')
+    if os.name == 'nt':
+        # Symbolic links need Developer Mode or admin rights on Windows; a
+        # junction and copies do not.
+        subprocess.run(['cmd', '/c', 'mklink', '/J', str(run / 'libraries'), str(home / 'libraries')],
+                       check=True, stdout=subprocess.DEVNULL)
+    else:
+        (run / 'libraries').symlink_to(home / 'libraries')
     (run / 'eula.txt').write_text('eula=true\n')
     (run / 'server.properties').write_text(SERVER_PROPERTIES)
     for jar in [*jars, *extra]:
-        (run / 'mods' / Path(jar).name).symlink_to(Path(jar).resolve())
+        target = run / 'mods' / Path(jar).name
+        if os.name == 'nt':
+            shutil.copy2(jar, target)
+        else:
+            target.symlink_to(Path(jar).resolve())
     return home, run
 
 
 def start(home, run, props, log_name='server.log', timeout=900):
     """Runs the server to its end; returns (seconds, the log)."""
-    args = home / f'libraries/net/neoforged/neoforge/{NEOFORGE}/unix_args.txt'
+    kind = 'win' if os.name == 'nt' else 'unix'
+    args = home / f'libraries/net/neoforged/neoforge/{NEOFORGE}/{kind}_args.txt'
     command = ['java', '-Xmx4G', *[f'-D{k}={v}' for k, v in props.items()], f'@{args}', 'nogui']
     began = time.monotonic()
     with (run / log_name).open('w') as log:
@@ -215,6 +226,7 @@ def export(args):
     exporter = build(home)
     home, run = instance('export', jars, [*deps, exporter])
     out = Path(args.out).resolve()
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.unlink(missing_ok=True)
     seconds, log = start(home, run, {'horizon.oracle.out': out, 'horizon.oracle.namespaces': namespaces})
     if not out.exists():

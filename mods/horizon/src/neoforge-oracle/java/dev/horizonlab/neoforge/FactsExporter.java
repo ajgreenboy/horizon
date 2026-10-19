@@ -73,7 +73,9 @@ public final class FactsExporter {
             new Export(server, namespaces, json).run();
         } catch (Throwable e) {
             e.printStackTrace();
-            System.exit(3);
+            // Not System.exit: on the server thread its shutdown hook waits
+            // for this thread, and the JVM never ends.
+            Runtime.getRuntime().halt(3);
         }
         System.out.println("horizon-oracle: wrote " + out);
         server.halt(false);

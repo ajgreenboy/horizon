@@ -346,6 +346,24 @@ impl Facts {
         Ok(self.declare(id, item, template))
     }
 
+    /// The item a mod block names as its own when that has another id (a
+    /// crop's seeds): one of the mod's items whose block item places this
+    /// block, with a template that has an item to copy. A wall sign shares
+    /// its standing sign's item and gets none.
+    pub fn named_item(&self, id: &str, template: &str) -> Option<&str> {
+        let block = self.blocks.get(id)?;
+        let item = block.item.as_str();
+        let own = id.split_once(':')?.0;
+        (item != id
+            && item.split_once(':').is_some_and(|(ns, _)| ns == own)
+            && self.items.get(item)?.block.as_deref() == Some(id)
+            && self
+                .blocks
+                .get(template)
+                .is_some_and(|t| t.item != "minecraft:air"))
+        .then_some(item)
+    }
+
     /// The declaration of an item a declared block names as its own (a
     /// crop's seeds): a copy of the template block's item with this item's
     /// differences.
@@ -609,6 +627,10 @@ mod tests {
         let crop = ["net.minecraft.world.level.block.CropBlock"];
         let mut wheat = block(&crop, json!({}), json!({"": state(0.0, "crop", json!([]))}));
         wheat["item"] = json!("minecraft:wheat_seeds");
+        let mut m_crop = wheat.clone();
+        m_crop["item"] = json!("m:seeds");
+        let mut wall_sign = wheat.clone();
+        wall_sign["item"] = json!("m:sign");
         let item = |class: &str, extra: Value| {
             let mut v = json!({"class": class, "max_stack_size": 64, "rarity": "common"});
             v.as_object_mut()
@@ -618,7 +640,7 @@ mod tests {
         };
         let vanilla = "net.minecraft.world.item.Item";
         let facts: Facts = serde_json::from_value(json!({
-            "blocks": {"minecraft:wheat": wheat},
+            "blocks": {"minecraft:wheat": wheat, "m:crop": m_crop, "m:wall_sign": wall_sign},
             "items": {
                 "minecraft:wheat_seeds": item(vanilla, json!({"block": "minecraft:wheat"})),
                 "m:stew": item("m.Consumable", json!({
@@ -634,6 +656,7 @@ mod tests {
                     "crafting_remainder": "other:mug",
                     "food": {"nutrition": 2, "saturation": 0.4, "eat_seconds": 1.6, "effects": []}})),
                 "m:seeds": item(vanilla, json!({"block": "m:crop"})),
+                "m:sign": item(vanilla, json!({"block": "m:sign"})),
             }
         }))
         .unwrap();
@@ -676,6 +699,13 @@ mod tests {
             ["crafting remainder other:mug (another mod's item)"]
         );
 
+        // A crop names its seeds; a wall sign does not name its standing
+        // sign's item.
+        assert_eq!(
+            facts.named_item("m:crop", "minecraft:wheat"),
+            Some("m:seeds")
+        );
+        assert_eq!(facts.named_item("m:wall_sign", "minecraft:wheat"), None);
         // A crop's seeds copy the template crop's item.
         let (seeds, differences) = facts.block_item("m:seeds", "minecraft:wheat").unwrap();
         assert_eq!(seeds, json!({"template": "minecraft:wheat_seeds"}));

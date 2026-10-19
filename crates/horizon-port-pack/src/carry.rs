@@ -926,15 +926,9 @@ pub fn carry(
             let mut v = json!({"template": choice.template, "properties": choice.properties});
             if block.item == "minecraft:air" {
                 v["item"] = json!(false);
-            } else if block.item.starts_with(&prefix)
-                && facts.items.contains_key(&block.item)
-                && facts
-                    .blocks
-                    .get(&choice.template)
-                    .is_some_and(|t| t.item != "minecraft:air")
-            {
-                v["item"] = json!(block.item);
-                named.insert(block.item.clone(), choice.template.clone());
+            } else if let Some(item) = facts.named_item(full, &choice.template) {
+                v["item"] = json!(item);
+                named.insert(item.to_owned(), choice.template.clone());
             } else if block.item != *full {
                 v["item"] = json!(false);
                 report
