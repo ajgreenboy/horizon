@@ -73,8 +73,16 @@ pub struct Item {
     pub rarity: String,
     #[serde(default)]
     pub block: Option<String>,
+    /// `nutrition`, `saturation`, `can_always_eat`, `eat_seconds`,
+    /// `using_converts_to` and `effects` (`id`, `duration`, `amplifier`,
+    /// `probability`), as 1.21.1's `FoodProperties`.
     #[serde(default)]
     pub food: Option<Value>,
+    /// `UseAnim`, lower case (`eat`, `drink`, `none`...).
+    #[serde(default)]
+    pub use_animation: Option<String>,
+    #[serde(default)]
+    pub crafting_remainder: Option<String>,
 }
 
 const VANILLA_PACKAGE: &str = "net.minecraft.";
@@ -323,28 +331,93 @@ impl Facts {
     }
 
     /// An item declaration for a mod item that is not a declared block's:
-    /// a vanilla template item with its stack size and rarity, and what it
-    /// does not reproduce.
+    /// a vanilla template item (bread for food, else a stick) with its stack
+    /// size, rarity, food and remainders, and what it does not reproduce.
     pub fn item(&self, id: &str) -> Result<(Value, Vec<String>), String> {
         let item = self.items.get(id).ok_or("not in the oracle")?;
         if item.block.is_some() {
             return Err("a block item without a block".into());
         }
+        let template = if item.food.is_some() {
+            "minecraft:bread"
+        } else {
+            "minecraft:stick"
+        };
+        Ok(self.declare(id, item, template))
+    }
+
+    /// The item a mod block names as its own when that has another id (a
+    /// crop's seeds): one of the mod's items whose block item places this
+    /// block, with a template that has an item to copy. A wall sign shares
+    /// its standing sign's item and gets none.
+    pub fn named_item(&self, id: &str, template: &str) -> Option<&str> {
+        let block = self.blocks.get(id)?;
+        let item = block.item.as_str();
+        let own = id.split_once(':')?.0;
+        (item != id
+            && item.split_once(':').is_some_and(|(ns, _)| ns == own)
+            && self.items.get(item)?.block.as_deref() == Some(id)
+            && self
+                .blocks
+                .get(template)
+                .is_some_and(|t| t.item != "minecraft:air"))
+        .then_some(item)
+    }
+
+    /// The declaration of an item a declared block names as its own (a
+    /// crop's seeds): a copy of the template block's item with this item's
+    /// differences.
+    pub fn block_item(&self, id: &str, template: &str) -> Result<(Value, Vec<String>), String> {
+        let item = self.items.get(id).ok_or("not in the oracle")?;
+        let block = self
+            .blocks
+            .get(template)
+            .ok_or("template not in the oracle")?;
+        if block.item == "minecraft:air" {
+            return Err(format!("template {template} has no item"));
+        }
+        Ok(self.declare(id, item, &block.item))
+    }
+
+    fn declare(&self, id: &str, item: &Item, template: &str) -> (Value, Vec<String>) {
         let mut differences = Vec::new();
         if !item.class.starts_with(VANILLA_PACKAGE) {
             differences.push(format!("class {} (behaviour beyond Item)", item.class));
         }
-        if item.food.is_some() {
-            return Err("food (no food template yet)".into());
-        }
-        let mut decl = json!({"template": "minecraft:stick"});
-        if item.max_stack_size != 64 {
+        let base = self.items.get(template);
+        let mut decl = json!({"template": template});
+        if item.max_stack_size != base.map_or(64, |b| b.max_stack_size) {
             decl["max_stack_size"] = json!(item.max_stack_size);
         }
-        if item.rarity != "common" {
+        if item.rarity != base.map_or("common", |b| b.rarity.as_str()) {
             decl["rarity"] = json!(item.rarity);
         }
-        Ok((decl, differences))
+        // Ids the content mod may name: vanilla's and its own.
+        let own = id.split_once(':').map_or("", |(ns, _)| ns);
+        let nameable = |r: &str| {
+            r.split_once(':')
+                .is_some_and(|(ns, _)| ns == "minecraft" || ns == own)
+        };
+        let mut components = serde_json::Map::new();
+        match &item.food {
+            Some(food) => food_components(food, item, &nameable, &mut components, &mut differences),
+            None if base.is_some_and(|b| b.food.is_some()) => {
+                components.insert("!minecraft:food".into(), json!({}));
+                components.insert("!minecraft:consumable".into(), json!({}));
+            }
+            None => {}
+        }
+        if !components.is_empty() {
+            decl["components"] = Value::Object(components);
+        }
+        if let Some(r) = &item.crafting_remainder {
+            if nameable(r) {
+                decl["crafting_remainder"] = json!(r);
+            } else {
+                differences.push(format!("crafting remainder {r} (another mod's item)"));
+            }
+        }
+        (decl, differences)
     }
 
     /// A tag's members the content mod may name: vanilla's and its own.
@@ -365,6 +438,63 @@ impl Facts {
                 .cloned()
                 .collect(),
         )
+    }
+}
+
+/// 1.21.1's food as 26.3's `food`, `consumable` and `use_remainder`
+/// components. Effects other mods add are left out, as differences.
+fn food_components(
+    food: &Value,
+    item: &Item,
+    nameable: &dyn Fn(&str) -> bool,
+    out: &mut serde_json::Map<String, Value>,
+    differences: &mut Vec<String>,
+) {
+    let mut f = json!({
+        "nutrition": food["nutrition"].as_u64().unwrap_or(0),
+        "saturation": food["saturation"].as_f64().unwrap_or(0.0),
+    });
+    if food["can_always_eat"].as_bool() == Some(true) {
+        f["can_always_eat"] = json!(true);
+    }
+    out.insert("minecraft:food".into(), f);
+    let drink = item.use_animation.as_deref() == Some("drink");
+    let mut effects = Vec::new();
+    for e in food["effects"].as_array().into_iter().flatten() {
+        let id = e["id"].as_str().unwrap_or("");
+        if !id.starts_with("minecraft:") {
+            differences.push(format!("effect {id} when eaten (no such effect)"));
+            continue;
+        }
+        effects.push(json!({
+            "type": "minecraft:apply_effects",
+            "effects": [{
+                "id": id,
+                "duration": e["duration"].as_i64().unwrap_or(0),
+                "amplifier": e["amplifier"].as_i64().unwrap_or(0),
+            }],
+            "probability": e["probability"].as_f64().unwrap_or(1.0),
+        }));
+    }
+    out.insert(
+        "minecraft:consumable".into(),
+        json!({
+            "consume_seconds": food["eat_seconds"].as_f64().unwrap_or(1.6),
+            "animation": if drink { "drink" } else { "eat" },
+            "sound": if drink { "minecraft:entity.generic.drink" } else { "minecraft:entity.generic.eat" },
+            "has_consume_particles": !drink,
+            "on_consume_effects": effects,
+        }),
+    );
+    match food["using_converts_to"].as_str() {
+        Some(r) if nameable(r) => {
+            out.insert(
+                "minecraft:use_remainder".into(),
+                json!({"id": r, "count": 1}),
+            );
+        }
+        Some(r) => differences.push(format!("leaves {r} when eaten (another mod's item)")),
+        None => {}
     }
 }
 
@@ -490,6 +620,96 @@ mod tests {
         assert_eq!(door(&me), Some(SelfDrop::Always));
         // Something else from the upper half: not a door table.
         assert_eq!(door(&json!({"hand": {"m:other": 1}})), None);
+    }
+
+    #[test]
+    fn foods_and_seeds_declare_their_components() {
+        let crop = ["net.minecraft.world.level.block.CropBlock"];
+        let mut wheat = block(&crop, json!({}), json!({"": state(0.0, "crop", json!([]))}));
+        wheat["item"] = json!("minecraft:wheat_seeds");
+        let mut m_crop = wheat.clone();
+        m_crop["item"] = json!("m:seeds");
+        let mut wall_sign = wheat.clone();
+        wall_sign["item"] = json!("m:sign");
+        let item = |class: &str, extra: Value| {
+            let mut v = json!({"class": class, "max_stack_size": 64, "rarity": "common"});
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            v
+        };
+        let vanilla = "net.minecraft.world.item.Item";
+        let facts: Facts = serde_json::from_value(json!({
+            "blocks": {"minecraft:wheat": wheat, "m:crop": m_crop, "m:wall_sign": wall_sign},
+            "items": {
+                "minecraft:wheat_seeds": item(vanilla, json!({"block": "minecraft:wheat"})),
+                "m:stew": item("m.Consumable", json!({
+                    "max_stack_size": 16, "use_animation": "eat",
+                    "crafting_remainder": "minecraft:bowl",
+                    "food": {"nutrition": 10, "saturation": 12.0, "can_always_eat": true,
+                        "eat_seconds": 1.6, "using_converts_to": "minecraft:bowl",
+                        "effects": [
+                            {"id": "minecraft:regeneration", "duration": 100, "amplifier": 0, "probability": 1.0},
+                            {"id": "m:comfort", "duration": 600, "amplifier": 0, "probability": 1.0}
+                        ]}})),
+                "m:cider": item(vanilla, json!({"use_animation": "drink",
+                    "crafting_remainder": "other:mug",
+                    "food": {"nutrition": 2, "saturation": 0.4, "eat_seconds": 1.6, "effects": []}})),
+                "m:seeds": item(vanilla, json!({"block": "m:crop"})),
+                "m:sign": item(vanilla, json!({"block": "m:sign"})),
+            }
+        }))
+        .unwrap();
+
+        let (stew, differences) = facts.item("m:stew").unwrap();
+        assert_eq!(
+            stew,
+            json!({
+                "template": "minecraft:bread",
+                "max_stack_size": 16,
+                "crafting_remainder": "minecraft:bowl",
+                "components": {
+                    "minecraft:food": {"nutrition": 10, "saturation": 12.0, "can_always_eat": true},
+                    "minecraft:consumable": {
+                        "consume_seconds": 1.6, "animation": "eat",
+                        "sound": "minecraft:entity.generic.eat", "has_consume_particles": true,
+                        "on_consume_effects": [{"type": "minecraft:apply_effects",
+                            "effects": [{"id": "minecraft:regeneration", "duration": 100, "amplifier": 0}],
+                            "probability": 1.0}]
+                    },
+                    "minecraft:use_remainder": {"id": "minecraft:bowl", "count": 1}
+                }
+            })
+        );
+        assert_eq!(
+            differences,
+            [
+                "class m.Consumable (behaviour beyond Item)",
+                "effect m:comfort when eaten (no such effect)"
+            ]
+        );
+        let (cider, differences) = facts.item("m:cider").unwrap();
+        assert_eq!(
+            cider["components"]["minecraft:consumable"]["animation"],
+            "drink"
+        );
+        assert!(cider.get("crafting_remainder").is_none());
+        assert_eq!(
+            differences,
+            ["crafting remainder other:mug (another mod's item)"]
+        );
+
+        // A crop names its seeds; a wall sign does not name its standing
+        // sign's item.
+        assert_eq!(
+            facts.named_item("m:crop", "minecraft:wheat"),
+            Some("m:seeds")
+        );
+        assert_eq!(facts.named_item("m:wall_sign", "minecraft:wheat"), None);
+        // A crop's seeds copy the template crop's item.
+        let (seeds, differences) = facts.block_item("m:seeds", "minecraft:wheat").unwrap();
+        assert_eq!(seeds, json!({"template": "minecraft:wheat_seeds"}));
+        assert!(differences.is_empty());
     }
 
     #[test]

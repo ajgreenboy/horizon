@@ -73,7 +73,9 @@ public final class FactsExporter {
             new Export(server, namespaces, json).run();
         } catch (Throwable e) {
             e.printStackTrace();
-            System.exit(3);
+            // Not System.exit: on the server thread its shutdown hook waits
+            // for this thread, and the JVM never ends.
+            Runtime.getRuntime().halt(3);
         }
         System.out.println("horizon-oracle: wrote " + out);
         server.halt(false);
@@ -338,12 +340,35 @@ public final class FactsExporter {
                 if (item instanceof BlockItem bi) {
                     json.name("block").value(BuiltInRegistries.BLOCK.getKey(bi.getBlock()).toString());
                 }
+                json.name("use_animation").value(stack.getUseAnimation().name().toLowerCase(java.util.Locale.ROOT));
+                ItemStack remainder = stack.getCraftingRemainingItem();
+                if (!remainder.isEmpty()) {
+                    json.name("crafting_remainder").value(BuiltInRegistries.ITEM.getKey(remainder.getItem()).toString());
+                }
                 var food = stack.get(net.minecraft.core.component.DataComponents.FOOD);
                 if (food != null) {
                     json.name("food");
                     json.beginObject();
                     json.name("nutrition").value(food.nutrition());
                     json.name("saturation").value(food.saturation());
+                    json.name("can_always_eat").value(food.canAlwaysEat());
+                    json.name("eat_seconds").value(food.eatSeconds());
+                    if (food.usingConvertsTo().isPresent()) {
+                        json.name("using_converts_to").value(
+                            BuiltInRegistries.ITEM.getKey(food.usingConvertsTo().get().getItem()).toString());
+                    }
+                    json.name("effects");
+                    json.beginArray();
+                    for (var possible : food.effects()) {
+                        var effect = possible.effect();
+                        json.beginObject();
+                        json.name("id").value(effect.getEffect().unwrapKey().map(k -> k.location().toString()).orElse(""));
+                        json.name("duration").value(effect.getDuration());
+                        json.name("amplifier").value(effect.getAmplifier());
+                        json.name("probability").value(possible.probability());
+                        json.endObject();
+                    }
+                    json.endArray();
                     json.endObject();
                 }
                 json.endObject();

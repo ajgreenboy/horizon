@@ -415,6 +415,15 @@ fn upgrade_condition(c: &mut Value) {
     {
         *c = json!(named);
     }
+    // NeoForge's tool abilities: the shears ones (`shears_harvest`,
+    // `shears_dig`...) are what vanilla's shears can do.
+    if c["type"] == "neoforge:can_item_perform_ability"
+        && c["ability"]
+            .as_str()
+            .is_some_and(|a| a.starts_with("shears_"))
+    {
+        *c = json!("minecraft:tool/can_shear");
+    }
 }
 
 /// 26.3's named tool conditions for the 1.21.1 predicates they replace.
@@ -906,6 +915,9 @@ pub fn carry(
         report.oracle = true;
         let prefix = format!("{id}:");
         let mut declared = BTreeSet::new();
+        // Items declared blocks name as theirs (a crop's seeds), with the
+        // block's template.
+        let mut named = BTreeMap::new();
         for (full, block) in facts.blocks.range(prefix.clone()..) {
             let Some(b) = full.strip_prefix(&prefix) else {
                 break;
@@ -923,6 +935,9 @@ pub fn carry(
             let mut v = json!({"template": choice.template, "properties": choice.properties});
             if block.item == "minecraft:air" {
                 v["item"] = json!(false);
+            } else if let Some(item) = facts.named_item(full, &choice.template) {
+                v["item"] = json!(item);
+                named.insert(item.to_owned(), choice.template.clone());
             } else if block.item != *full {
                 v["item"] = json!(false);
                 report
@@ -976,6 +991,21 @@ pub fn carry(
                 break;
             };
             if declared.contains(full) {
+                continue;
+            }
+            if let Some(template) = named.get(full) {
+                match facts.block_item(full, template) {
+                    Ok((v, differences)) => {
+                        write_decl("item", name, &v)?;
+                        report.items += 1;
+                        if !differences.is_empty() {
+                            report.differences.insert(name.to_owned(), differences);
+                        }
+                    }
+                    Err(e) => {
+                        report.items_unknown.insert(name.to_owned(), e);
+                    }
+                }
                 continue;
             }
             if item
@@ -1201,6 +1231,15 @@ mod tests {
             json!({"type": "minecraft:all_of", "terms": [
                 {"type": "minecraft:any_of", "terms": ["minecraft:tool/can_silk_touch", "minecraft:tool/can_shear"]},
                 {"type": "minecraft:survives_explosion"}]})
+        );
+        // Farmer's Delight's wild crops: NeoForge's shears ability.
+        let mut wild = json!({"pools": [{"conditions": [{"condition": "minecraft:inverted",
+            "term": {"condition": "neoforge:can_item_perform_ability", "ability": "shears_harvest"}}],
+            "entries": []}]});
+        upgrade_loot(&mut wild);
+        assert_eq!(
+            wild["pools"][0]["condition"],
+            json!({"type": "minecraft:inverted", "term": "minecraft:tool/can_shear"})
         );
         // A loot table already in 26.3's shape stays as it is.
         let mut new = glass.clone();

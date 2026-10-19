@@ -94,11 +94,24 @@ struct BlockFile {
     template: String,
     #[serde(default)]
     properties: BlockProperties,
-    #[serde(default = "yes")]
-    item: bool,
+    #[serde(default)]
+    item: ItemChoice,
 }
-fn yes() -> bool {
-    true
+
+/// A block file's `item`: whether the block has an item named as the block
+/// (`true`, the default, or `false`), or the id of its item when that is
+/// named otherwise, as a crop's seeds are (`"farmersdelight:cabbage_seeds"`
+/// for `farmersdelight:cabbages`).
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ItemChoice {
+    Has(bool),
+    Named(String),
+}
+impl Default for ItemChoice {
+    fn default() -> Self {
+        ItemChoice::Has(true)
+    }
 }
 
 /// A block the mod adds: a vanilla template's behaviour, states and shapes
@@ -110,8 +123,11 @@ pub struct Block {
     /// The vanilla block it copies, `minecraft:<path>`.
     pub template: String,
     pub properties: BlockProperties,
-    /// Also add a block item with the same id.
-    pub item: bool,
+    /// The block's item: `<mod id>:<path>`, the block's own id unless the
+    /// file names another; `None` for a block without one. An item declared
+    /// under that id in `item/` is the block's item; otherwise the item is a
+    /// copy of the template block's.
+    pub item: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -330,19 +346,37 @@ impl Content {
                 ));
             }
         }
+        // Items so far, and the ones blocks name as theirs: an item file
+        // may declare those.
         let mut ids = BTreeSet::new();
+        let mut named = BTreeSet::new();
         for (block, name) in blocks {
             let file: BlockFile =
                 serde_json::from_slice(&self.file(&name)?).map_err(|e| format!("{name}: {e}"))?;
             check_block(&file).map_err(|e| format!("{name}: {e}"))?;
-            if file.item {
-                ids.insert(block.clone());
+            let item = match file.item {
+                ItemChoice::Has(false) => None,
+                ItemChoice::Has(true) => Some(block.clone()),
+                ItemChoice::Named(item) => {
+                    if !item.strip_prefix(&format!("{id}:")).is_some_and(id_path) {
+                        return Err(format!(
+                            "{name}: item {item:?} is not an item id of this mod ({id}:...)"
+                        ));
+                    }
+                    named.insert(item.clone());
+                    Some(item)
+                }
+            };
+            if let Some(item) = &item
+                && !ids.insert(item.clone())
+            {
+                return Err(format!("{name}: {item} is another block's item too"));
             }
             self.blocks.push(Block {
                 id: block,
                 template: file.template,
                 properties: file.properties,
-                item: file.item,
+                item,
             });
         }
         for (item, name) in items {
@@ -377,7 +411,7 @@ impl Content {
                     "{name}: crafting_remainder {r:?} is not an item id (namespace:path)"
                 ));
             }
-            if !ids.insert(item.clone()) {
+            if !ids.insert(item.clone()) && !named.remove(&item) {
                 return Err(format!("{name}: {item} is also a block's item"));
             }
             self.items.push(Item {
@@ -534,7 +568,7 @@ capabilities = ["registries"]
                     sounds: Some("minecraft:amethyst_block".into()),
                     ..BlockProperties::default()
                 },
-                item: true,
+                item: Some("ruby:ruby_block".into()),
             }]
         );
         assert_eq!(content.items[0].id, "ruby:ruby");
@@ -667,6 +701,66 @@ capabilities = ["registries"]
             br#"{"template": "minecraft:bread", "crafting_remainder": "Bowl"}"#,
         );
         assert!(e.contains("not an item id"), "{e}");
+    }
+
+    #[test]
+    fn blocks_name_their_items() {
+        let crop: &[u8] = br#"{"template": "minecraft:wheat", "item": "ruby:ruby_seeds"}"#;
+        let seeds: &[u8] = br#"{"template": "minecraft:wheat_seeds", "rarity": "uncommon"}"#;
+        let content = hmod(
+            "named",
+            MANIFEST_TEXT,
+            &[
+                ("data/ruby/horizon/block/rubies.json", crop),
+                ("data/ruby/horizon/item/ruby_seeds.json", seeds),
+                (
+                    "data/ruby/horizon/block/ruby_glass.json",
+                    br#"{"template": "minecraft:glass", "item": false}"#,
+                ),
+            ],
+        )
+        .unwrap();
+        let item = |id: &str| {
+            content
+                .blocks
+                .iter()
+                .find(|b| b.id == id)
+                .unwrap()
+                .item
+                .clone()
+        };
+        assert_eq!(item("ruby:rubies").as_deref(), Some("ruby:ruby_seeds"));
+        assert_eq!(item("ruby:ruby_glass"), None);
+        assert_eq!(content.items[0].id, "ruby:ruby_seeds");
+        // Without an item file, the game copies the template's item.
+        let content = hmod(
+            "named-alone",
+            MANIFEST_TEXT,
+            &[("data/ruby/horizon/block/rubies.json", crop)],
+        )
+        .unwrap();
+        assert!(content.items.is_empty());
+
+        let e = hmod(
+            "named-other-ns",
+            MANIFEST_TEXT,
+            &[(
+                "data/ruby/horizon/block/rubies.json",
+                br#"{"template": "minecraft:wheat", "item": "minecraft:wheat_seeds"}"#,
+            )],
+        )
+        .unwrap_err();
+        assert!(e.contains("not an item id of this mod"), "{e}");
+        let e = hmod(
+            "named-twice",
+            MANIFEST_TEXT,
+            &[
+                ("data/ruby/horizon/block/a.json", crop),
+                ("data/ruby/horizon/block/b.json", crop),
+            ],
+        )
+        .unwrap_err();
+        assert!(e.contains("another block's item"), "{e}");
     }
 
     #[test]
